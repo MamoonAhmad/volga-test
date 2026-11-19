@@ -1,0 +1,15 @@
+services:
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      # Defaults to the mock engine so `docker compose up` works without credentials.
+      STT_ENGINE: ${STT_ENGINE:-mock}
+    # For Google STT: set STT_ENGINE=google in .env and mount the service account key.
+    # volumes:
+    #   - ./service-account.json:/secrets/service-account.json:ro
+    # and set GOOGLE_APPLICATION_CREDENTIALS=/secrets/service-account.json in .env

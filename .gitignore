@@ -6,3 +6,5 @@ uploads/
 .env
 *.json.key
 service-account*.json
+.coverage
+htmlcov/

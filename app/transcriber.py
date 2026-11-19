@@ -1,5 +1,4 @@
 """Speech-to-text engines behind one interface."""
-import math
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -115,26 +114,6 @@ class GoogleSTTEngine:
         return segments
 
 
-class WhisperEngine:
-    """Local open-source model (faster-whisper). No per-minute cost; audio stays on the host.
-
-    Whisper processes audio in 30s windows internally, so long files need no special path.
-    """
-
-    def __init__(self, model_size: str):
-        from faster_whisper import WhisperModel
-
-        self.model = WhisperModel(model_size, device="auto", compute_type="int8")
-
-    def transcribe(self, path: Path, duration: float | None) -> list[Segment]:
-        segments, _ = self.model.transcribe(str(path), vad_filter=True)
-        return [
-            Segment(round(s.start, 2), round(s.end, 2), s.text.strip(),
-                    round(math.exp(s.avg_logprob), 3))
-            for s in segments
-        ]
-
-
 class MockEngine:
     """Deterministic engine for tests and local development without credentials."""
 
@@ -148,8 +127,6 @@ class MockEngine:
 def build_engine(settings: Settings) -> SpeechEngine:
     if settings.engine == "google":
         return GoogleSTTEngine(settings.gcp_project, settings.language, settings.gcs_bucket)
-    if settings.engine == "whisper":
-        return WhisperEngine(settings.whisper_model)
     if settings.engine == "mock":
         return MockEngine()
     raise ValueError(f"Unknown STT_ENGINE {settings.engine!r}")

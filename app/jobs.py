@@ -10,7 +10,7 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
 
@@ -28,7 +28,7 @@ class JobStatus(str, Enum):
 
 
 def _now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 @dataclass
@@ -88,13 +88,24 @@ class JobManager:
             job.updated_at = _now()
 
     def _run(self, job_id: str, path: Path) -> None:
-        self._update(job_id, status=JobStatus.PROCESSING)
+        audio = path
         try:
+            self._update(job_id, status=JobStatus.PROCESSING)
             audio = normalize(path)
-            duration = probe_duration(audio)
+            self._transcribe(job_id, audio)
         except InvalidAudio as e:
             self._update(job_id, status=JobStatus.FAILED, error=str(e))
-            return
+        except Exception:
+            log.exception("job %s crashed", job_id)
+            self._update(job_id, status=JobStatus.FAILED, error="Internal error during transcription")
+        finally:
+            # The transcript is the product; raw audio is not retained after processing.
+            path.unlink(missing_ok=True)
+            if audio != path:
+                audio.unlink(missing_ok=True)
+
+    def _transcribe(self, job_id: str, audio: Path) -> None:
+        duration = probe_duration(audio)
         self._update(job_id, duration_sec=duration)
 
         last_error: Exception | None = None
@@ -107,14 +118,10 @@ class JobManager:
                 log.warning("job %s attempt %d failed transiently: %s", job_id, attempt, e)
                 if attempt < self.max_retries:
                     # Exponential backoff with jitter so concurrent retries don't align.
-                    time.sleep(self.backoff_base ** attempt + random.uniform(0, self.backoff_base))
+                    time.sleep(self.backoff_base ** attempt + random.uniform(0, self.backoff_base))  # noqa: S311
                 continue
             except TranscriptionError as e:
                 self._update(job_id, status=JobStatus.FAILED, error=str(e))
-                return
-            except Exception:
-                log.exception("job %s crashed", job_id)
-                self._update(job_id, status=JobStatus.FAILED, error="Internal error during transcription")
                 return
             self._update(job_id, status=JobStatus.DONE, segments=segments)
             return

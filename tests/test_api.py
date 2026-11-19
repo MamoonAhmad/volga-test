@@ -1,8 +1,10 @@
+import dataclasses
 import time
 
 import pytest
 from fastapi.testclient import TestClient
 
+from app.config import settings
 from app.main import create_app
 from app.transcriber import MockEngine, Segment, TranscriptionError, TransientError
 from tests.conftest import make_wav
@@ -33,14 +35,16 @@ class BrokenEngine:
 
 @pytest.fixture
 def make_client(tmp_path):
-    def _make(engine=None, **kwargs):
-        app = create_app(engine or MockEngine(), upload_dir=tmp_path, backoff_base=0.01, **kwargs)
-        return TestClient(app)
+    def _make(engine=None, **overrides):
+        defaults = {"upload_dir": tmp_path, "api_key": None, "max_retries": 3}
+        cfg = dataclasses.replace(settings, **{**defaults, **overrides})
+        return TestClient(create_app(engine or MockEngine(), settings=cfg, backoff_base=0.01))
     return _make
 
 
-def upload(client, data: bytes, name: str = "sample.wav"):
-    return client.post("/v1/transcriptions", files={"file": (name, data, "audio/wav")})
+def upload(client, data: bytes, name: str = "sample.wav", headers: dict | None = None):
+    return client.post("/v1/transcriptions", files={"file": (name, data, "audio/wav")},
+                       headers=headers)
 
 
 def wait_for(client, job_id: str, timeout: float = 5.0) -> dict:
@@ -133,3 +137,49 @@ def test_concurrent_uploads(make_client):
     ids = [upload(client, make_wav(seconds=0.1 * (i + 1))).json()["id"] for i in range(10)]
     assert len(set(ids)) == 10
     assert all(wait_for(client, i)["status"] == "done" for i in ids)
+
+
+def test_audio_is_deleted_after_processing(make_client, wav_bytes, tmp_path):
+    client = make_client()
+    wait_for(client, upload(client, wav_bytes).json()["id"])
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_audio_is_deleted_after_failure(make_client, wav_bytes, tmp_path):
+    client = make_client(BrokenEngine())
+    wait_for(client, upload(client, wav_bytes).json()["id"])
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_rejected_upload_leaves_no_file(make_client, tmp_path):
+    upload(make_client(), b"not audio" * 100)
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_unexpected_engine_crash_marks_job_failed(make_client, wav_bytes):
+    class CrashingEngine:
+        def transcribe(self, path, duration):
+            raise RuntimeError("bug")
+
+    client = make_client(CrashingEngine())
+    job = wait_for(client, upload(client, wav_bytes).json()["id"])
+    assert job["status"] == "failed"
+    assert job["error"] == "Internal error during transcription"  # internals not leaked
+
+
+def test_api_key_required_when_configured(make_client, wav_bytes):
+    client = make_client(api_key="secret")
+    assert upload(client, wav_bytes).status_code == 401
+    assert upload(client, wav_bytes, headers={"X-API-Key": "wrong"}).status_code == 401
+    resp = upload(client, wav_bytes, headers={"X-API-Key": "secret"})
+    assert resp.status_code == 202
+    job_id = resp.json()["id"]
+    assert client.get(f"/v1/transcriptions/{job_id}").status_code == 401
+    assert client.get(f"/v1/transcriptions/{job_id}",
+                      headers={"X-API-Key": "secret"}).status_code == 200
+
+
+def test_health_is_public(make_client):
+    resp = make_client(api_key="secret").get("/health")
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "ok"
